@@ -23,18 +23,34 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
 
 	amsvc "github.com/wso2/agent-manager/cli/pkg/clients/amsvc/gen"
 	"github.com/wso2/agent-manager/cli/pkg/clierr"
+	"github.com/wso2/agent-manager/cli/pkg/cmdutil"
 	"github.com/wso2/agent-manager/cli/pkg/config"
 	"github.com/wso2/agent-manager/cli/pkg/iostreams"
 )
+
+type capturedRequest struct {
+	called   bool
+	rawQuery string
+}
 
 func newTestIO() (*iostreams.IOStreams, *bytes.Buffer) {
 	io, _, out, _ := iostreams.Test()
 	io.JSON = true
 	return io, out
+}
+
+func newTextTestIO(stdoutTTY bool) (*iostreams.IOStreams, *bytes.Buffer, *bytes.Buffer) {
+	io, _, out, errOut := iostreams.Test()
+	io.SetTerminal(stdoutTTY, stdoutTTY, stdoutTTY)
+	return io, out, errOut
 }
 
 func decodeEnvelope(t *testing.T, raw string) map[string]any {
@@ -56,9 +72,12 @@ func writeConfig(t *testing.T, cfg *config.Config) func() (*config.Config, error
 	return func() (*config.Config, error) { return config.Load(path) }
 }
 
-func newTestClient(t *testing.T, status int, body any) (func(context.Context) (*amsvc.ClientWithResponses, error), func()) {
+func newTestClient(t *testing.T, status int, body any) (func(context.Context) (*amsvc.ClientWithResponses, error), *capturedRequest, func()) {
 	t.Helper()
+	captured := &capturedRequest{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.called = true
+		captured.rawQuery = r.URL.RawQuery
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if body != nil {
@@ -72,7 +91,26 @@ func newTestClient(t *testing.T, status int, body any) (func(context.Context) (*
 		server.Close()
 		t.Fatalf("new client: %v", err)
 	}
-	return func(context.Context) (*amsvc.ClientWithResponses, error) { return client, nil }, server.Close
+	return func(context.Context) (*amsvc.ClientWithResponses, error) { return client, nil }, captured, server.Close
+}
+
+func testOrgCmd(t *testing.T, ios *iostreams.IOStreams, clientFn func(context.Context) (*amsvc.ClientWithResponses, error)) *cobra.Command {
+	t.Helper()
+	f := &cmdutil.Factory{
+		IOStreams:    ios,
+		AgentManager: clientFn,
+		Config: func() (*config.Config, error) {
+			return &config.Config{
+				CurrentInstance: "prod",
+				Instances: map[string]config.Instance{
+					"prod": {URL: "https://prod.example.com"},
+				},
+			}, nil
+		},
+	}
+	root := &cobra.Command{Use: "amctl", SilenceErrors: true, SilenceUsage: true}
+	root.AddCommand(NewOrgCmd(f))
+	return root
 }
 
 func TestList_Success(t *testing.T) {
@@ -83,7 +121,7 @@ func TestList_Success(t *testing.T) {
 			"prod": {URL: "https://prod.example.com"},
 		},
 	})
-	clientFn, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationListResponse{
+	clientFn, _, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationListResponse{
 		Limit:  20,
 		Offset: 0,
 		Total:  2,
@@ -117,7 +155,7 @@ func TestList_ServerError(t *testing.T) {
 			"prod": {URL: "https://prod.example.com"},
 		},
 	})
-	clientFn, closeFn := newTestClient(t, http.StatusInternalServerError, amsvc.ErrorResponse{
+	clientFn, _, closeFn := newTestClient(t, http.StatusInternalServerError, amsvc.ErrorResponse{
 		Code:    "INTERNAL",
 		Message: "something broke",
 	})
@@ -137,7 +175,7 @@ func TestList_ServerError(t *testing.T) {
 func TestList_NoInstance(t *testing.T) {
 	io, out := newTestIO()
 	cfgFn := writeConfig(t, &config.Config{})
-	clientFn, closeFn := newTestClient(t, http.StatusOK, nil)
+	clientFn, _, closeFn := newTestClient(t, http.StatusOK, nil)
 	defer closeFn()
 
 	err := runList(context.Background(), &ListOptions{IO: io, Config: cfgFn, Client: clientFn})
@@ -148,5 +186,85 @@ func TestList_NoInstance(t *testing.T) {
 	errBody := env["error"].(map[string]any)
 	if errBody["code"] != clierr.NoInstance {
 		t.Errorf("code = %v, want %s", errBody["code"], clierr.NoInstance)
+	}
+}
+
+func TestList_SendsPagination(t *testing.T) {
+	io, _ := newTestIO()
+	cfgFn := writeConfig(t, &config.Config{
+		CurrentInstance: "prod",
+		Instances: map[string]config.Instance{
+			"prod": {URL: "https://prod.example.com"},
+		},
+	})
+	clientFn, captured, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationListResponse{
+		Limit: 5, Offset: 10, Total: 15,
+		Organizations: []amsvc.OrganizationListItem{{Name: "acme"}},
+	})
+	defer closeFn()
+
+	limit, offset := 5, 10
+	if err := runList(context.Background(), &ListOptions{
+		IO: io, Config: cfgFn, Client: clientFn, Limit: &limit, Offset: &offset,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(captured.rawQuery, "limit=5") || !strings.Contains(captured.rawQuery, "offset=10") {
+		t.Errorf("rawQuery = %q, want limit=5 and offset=10", captured.rawQuery)
+	}
+}
+
+func TestList_TruncationHintOnTTY(t *testing.T) {
+	io, _, errOut := newTextTestIO(true)
+	cfgFn := writeConfig(t, &config.Config{
+		CurrentInstance: "prod",
+		Instances: map[string]config.Instance{
+			"prod": {URL: "https://prod.example.com"},
+		},
+	})
+	orgs := make([]amsvc.OrganizationListItem, 50)
+	for i := range orgs {
+		orgs[i] = amsvc.OrganizationListItem{Name: "o", CreatedAt: time.Unix(0, 0).UTC()}
+	}
+	clientFn, _, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationListResponse{
+		Limit: 50, Offset: 0, Total: 63, Organizations: orgs,
+	})
+	defer closeFn()
+
+	if err := runList(context.Background(), &ListOptions{IO: io, Config: cfgFn, Client: clientFn}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "Showing 50 of 63 organizations") {
+		t.Errorf("errOut = %q, want truncation hint", errOut.String())
+	}
+}
+
+func TestListCmd_RejectsZeroLimit(t *testing.T) {
+	io, _ := newTestIO()
+	clientFn, captured, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationListResponse{})
+	defer closeFn()
+
+	root := testOrgCmd(t, io, clientFn)
+	root.SetArgs([]string{"org", "list", "--limit", "0"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected an error for --limit 0")
+	}
+	if captured.called {
+		t.Error("server was called despite an invalid --limit")
+	}
+}
+
+func TestListCmd_RejectsNegativeOffset(t *testing.T) {
+	io, _ := newTestIO()
+	clientFn, captured, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationListResponse{})
+	defer closeFn()
+
+	root := testOrgCmd(t, io, clientFn)
+	root.SetArgs([]string{"org", "list", "--offset", "-1"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected an error for --offset -1")
+	}
+	if captured.called {
+		t.Error("server was called despite an invalid --offset")
 	}
 }

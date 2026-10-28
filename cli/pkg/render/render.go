@@ -77,6 +77,18 @@ func EmptyList(ios *iostreams.IOStreams, message string) error {
 	return err
 }
 
+// TruncationHint tells an interactive user that a list response was capped by
+// pagination, so a capped page doesn't silently read as "that's everything."
+// Piped output stays silent, matching EmptyList, and --json is unaffected
+// since the full Total/Limit/Offset are already in the envelope.
+func TruncationHint(ios *iostreams.IOStreams, shown, total int, noun string) error {
+	if !ios.IsStdoutTTY() || shown >= total {
+		return nil
+	}
+	_, err := fmt.Fprintf(ios.ErrOut, "Showing %d of %d %s. Use --offset (or --limit) to see more.\n", shown, total, noun)
+	return err
+}
+
 // JSONError writes the error JSON envelope to io.Out and returns a sentinel
 // that signals the envelope has already been written.
 func JSONError(ios *iostreams.IOStreams, scope Scope, err error) error {

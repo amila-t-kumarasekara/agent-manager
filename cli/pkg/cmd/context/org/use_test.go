@@ -34,7 +34,7 @@ func TestUse_ValidOrg(t *testing.T) {
 			"prod": {URL: "https://prod.example.com", CurrentOrg: "old-org"},
 		},
 	})
-	clientFn, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationResponse{
+	clientFn, _, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationResponse{
 		Name:        "acme",
 		DisplayName: "Acme Corp",
 		Namespace:   "acme",
@@ -69,7 +69,7 @@ func TestUse_OrgNotFound(t *testing.T) {
 		},
 	})
 	reason := "not found"
-	clientFn, closeFn := newTestClient(t, http.StatusNotFound, amsvc.ErrorResponse{
+	clientFn, _, closeFn := newTestClient(t, http.StatusNotFound, amsvc.ErrorResponse{
 		Code:    "ORG_NOT_FOUND",
 		Message: "Organization 'nope' not found",
 		Reason:  &reason,
@@ -95,7 +95,7 @@ func TestUse_OrgNotFound(t *testing.T) {
 func TestUse_NoInstance(t *testing.T) {
 	io, out := newTestIO()
 	cfgFn := writeConfig(t, &config.Config{})
-	clientFn, closeFn := newTestClient(t, http.StatusOK, nil)
+	clientFn, _, closeFn := newTestClient(t, http.StatusOK, nil)
 	defer closeFn()
 
 	err := runUse(context.Background(), &UseOptions{IO: io, Config: cfgFn, Client: clientFn, Name: "acme"})
@@ -117,7 +117,7 @@ func TestUse_DanglingCurrentInstance(t *testing.T) {
 			"prod": {URL: "https://prod.example.com"},
 		},
 	})
-	clientFn, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationResponse{
+	clientFn, _, closeFn := newTestClient(t, http.StatusOK, amsvc.OrganizationResponse{
 		Name: "acme", DisplayName: "Acme", Namespace: "acme",
 	})
 	defer closeFn()
@@ -146,7 +146,7 @@ func TestUse_EmptyName(t *testing.T) {
 			"prod": {URL: "https://prod.example.com"},
 		},
 	})
-	clientFn, closeFn := newTestClient(t, http.StatusOK, nil)
+	clientFn, _, closeFn := newTestClient(t, http.StatusOK, nil)
 	defer closeFn()
 
 	err := runUse(context.Background(), &UseOptions{IO: io, Config: cfgFn, Client: clientFn, Name: ""})

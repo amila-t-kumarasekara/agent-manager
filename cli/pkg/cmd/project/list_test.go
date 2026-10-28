@@ -19,7 +19,9 @@ package project
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	amsvc "github.com/wso2/agent-manager/cli/pkg/clients/amsvc/gen"
 )
@@ -75,5 +77,76 @@ func TestList_ServerError(t *testing.T) {
 	errBody := env["error"].(map[string]any)
 	if errBody["code"] != "INTERNAL" {
 		t.Errorf("code = %v, want INTERNAL", errBody["code"])
+	}
+}
+
+func TestList_SendsPagination(t *testing.T) {
+	io, _, _ := newTestIO(true)
+	clientFn, captured, closeFn := newTestClient(t, http.StatusOK, amsvc.ProjectListResponse{
+		Limit: 5, Offset: 10, Total: 15,
+		Projects: []amsvc.ProjectListItem{{Name: "alpha"}},
+	})
+	defer closeFn()
+
+	limit, offset := 5, 10
+	if err := runList(context.Background(), &ListOptions{
+		IO: io, Client: clientFn, Org: "acme", Scope: baseScope(),
+		Limit: &limit, Offset: &offset,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(captured.rawQuery, "limit=5") || !strings.Contains(captured.rawQuery, "offset=10") {
+		t.Errorf("rawQuery = %q, want limit=5 and offset=10", captured.rawQuery)
+	}
+}
+
+func TestList_TruncationHintOnTTY(t *testing.T) {
+	io, _, errOut := newTextTestIO(true)
+	projects := make([]amsvc.ProjectListItem, 50)
+	for i := range projects {
+		projects[i] = amsvc.ProjectListItem{Name: "p", CreatedAt: time.Unix(0, 0).UTC()}
+	}
+	clientFn, _, closeFn := newTestClient(t, http.StatusOK, amsvc.ProjectListResponse{
+		Limit: 50, Offset: 0, Total: 63, Projects: projects,
+	})
+	defer closeFn()
+
+	if err := runList(context.Background(), &ListOptions{
+		IO: io, Client: clientFn, Org: "acme", Scope: baseScope(),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "Showing 50 of 63 projects") {
+		t.Errorf("errOut = %q, want truncation hint", errOut.String())
+	}
+}
+
+func TestListCmd_RejectsZeroLimit(t *testing.T) {
+	io, _, _ := newTestIO(true)
+	clientFn, captured, closeFn := newTestClient(t, http.StatusOK, amsvc.ProjectListResponse{})
+	defer closeFn()
+
+	root := testProjectCmd(t, io, clientFn)
+	root.SetArgs([]string{"project", "list", "--limit", "0"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected an error for --limit 0")
+	}
+	if captured.called {
+		t.Error("server was called despite an invalid --limit")
+	}
+}
+
+func TestListCmd_RejectsNegativeOffset(t *testing.T) {
+	io, _, _ := newTestIO(true)
+	clientFn, captured, closeFn := newTestClient(t, http.StatusOK, amsvc.ProjectListResponse{})
+	defer closeFn()
+
+	root := testProjectCmd(t, io, clientFn)
+	root.SetArgs([]string{"project", "list", "--offset", "-1"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected an error for --offset -1")
+	}
+	if captured.called {
+		t.Error("server was called despite an invalid --offset")
 	}
 }

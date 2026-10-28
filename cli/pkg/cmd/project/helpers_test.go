@@ -26,7 +26,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	amsvc "github.com/wso2/agent-manager/cli/pkg/clients/amsvc/gen"
+	"github.com/wso2/agent-manager/cli/pkg/cmdutil"
+	"github.com/wso2/agent-manager/cli/pkg/config"
 	"github.com/wso2/agent-manager/cli/pkg/iostreams"
 	"github.com/wso2/agent-manager/cli/pkg/render"
 )
@@ -35,6 +39,7 @@ type capturedRequest struct {
 	called      bool
 	method      string
 	path        string
+	rawQuery    string
 	contentType string
 	body        []byte
 }
@@ -46,6 +51,7 @@ func newTestClient(t *testing.T, status int, body any) (func(context.Context) (*
 		captured.called = true
 		captured.method = r.Method
 		captured.path = r.URL.Path
+		captured.rawQuery = r.URL.RawQuery
 		captured.contentType = r.Header.Get("Content-Type")
 		if r.Body != nil {
 			raw, err := io.ReadAll(r.Body)
@@ -94,6 +100,32 @@ func newTestIO(canPrompt bool) (*iostreams.IOStreams, *bytes.Buffer, *bytes.Buff
 	io.SetTerminal(canPrompt, canPrompt, canPrompt)
 	io.JSON = true
 	return io, out, errOut
+}
+
+func newTextTestIO(stdoutTTY bool) (*iostreams.IOStreams, *bytes.Buffer, *bytes.Buffer) {
+	io, _, out, errOut := iostreams.Test()
+	io.SetTerminal(stdoutTTY, stdoutTTY, stdoutTTY)
+	return io, out, errOut
+}
+
+func testProjectCmd(t *testing.T, ios *iostreams.IOStreams, clientFn func(context.Context) (*amsvc.ClientWithResponses, error)) *cobra.Command {
+	t.Helper()
+	f := &cmdutil.Factory{
+		IOStreams:    ios,
+		AgentManager: clientFn,
+		Config: func() (*config.Config, error) {
+			return &config.Config{
+				CurrentInstance: "default",
+				Instances: map[string]config.Instance{
+					"default": {URL: "http://test", CurrentOrg: "acme"},
+				},
+			}, nil
+		},
+	}
+	root := &cobra.Command{Use: "amctl", SilenceErrors: true, SilenceUsage: true}
+	cmdutil.EnableOrgOverride(root, f)
+	root.AddCommand(NewProjectCmd(f))
+	return root
 }
 
 func decodeEnvelope(t *testing.T, raw string) map[string]any {
