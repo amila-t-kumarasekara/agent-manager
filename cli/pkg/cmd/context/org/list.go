@@ -34,6 +34,9 @@ type ListOptions struct {
 	IO     *iostreams.IOStreams
 	Config func() (*config.Config, error)
 	Client func(context.Context) (*amsvc.ClientWithResponses, error)
+
+	Limit  *int
+	Offset *int
 }
 
 func NewListCmd(f *cmdutil.Factory) *cobra.Command {
@@ -42,14 +45,33 @@ func NewListCmd(f *cmdutil.Factory) *cobra.Command {
 		Config: f.Config,
 		Client: f.AgentManager,
 	}
-	return &cobra.Command{
+	var limit, offset int
+
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List organizations",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			scope := render.Scope{}
+
+			if cmd.Flags().Changed("limit") {
+				if limit < 1 {
+					return render.Error(opts.IO, scope, cmdutil.FlagErrorf("--limit must be at least 1"))
+				}
+				opts.Limit = &limit
+			}
+			if cmd.Flags().Changed("offset") {
+				if offset < 0 {
+					return render.Error(opts.IO, scope, cmdutil.FlagErrorf("--offset must be at least 0"))
+				}
+				opts.Offset = &offset
+			}
 			return runList(cmd.Context(), opts)
 		},
 	}
+	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum number of results to return")
+	cmd.Flags().IntVar(&offset, "offset", 0, "Number of results to skip")
+	return cmd
 }
 
 func runList(ctx context.Context, o *ListOptions) error {
@@ -69,8 +91,10 @@ func runList(ctx context.Context, o *ListOptions) error {
 		return render.Error(o.IO, scope, err)
 	}
 
-	// TODO: paginate
-	resp, err := client.ListOrganizationsWithResponse(ctx, &amsvc.ListOrganizationsParams{})
+	resp, err := client.ListOrganizationsWithResponse(ctx, &amsvc.ListOrganizationsParams{
+		Limit:  o.Limit,
+		Offset: o.Offset,
+	})
 	if err != nil {
 		return render.Error(o.IO, scope, clierr.Newf(clierr.Transport, "%v", err))
 	}
@@ -89,5 +113,8 @@ func runList(ctx context.Context, o *ListOptions) error {
 		tp.AddField(org.CreatedAt.Format("2006-01-02"), tableprinter.WithColor(cs.Gray))
 		tp.EndRow()
 	}
-	return tp.Render()
+	if err := tp.Render(); err != nil {
+		return err
+	}
+	return render.TruncationHint(o.IO, resp.JSON200.Offset+len(resp.JSON200.Organizations), resp.JSON200.Total, "organizations")
 }

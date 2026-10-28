@@ -35,8 +35,10 @@ type ListOptions struct {
 	ResolveScope func(*cobra.Command, bool, bool) (string, string, error)
 	MakeScope    func(org, proj string) render.Scope
 
-	Org   string
-	Scope render.Scope
+	Org    string
+	Scope  render.Scope
+	Limit  *int
+	Offset *int
 }
 
 func NewListCmd(f *cmdutil.Factory) *cobra.Command {
@@ -46,7 +48,9 @@ func NewListCmd(f *cmdutil.Factory) *cobra.Command {
 		ResolveScope: f.ResolveOrgProject,
 		MakeScope:    f.Scope,
 	}
-	return &cobra.Command{
+	var limit, offset int
+
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List projects in an organization",
 		Args:  cobra.NoArgs,
@@ -57,9 +61,25 @@ func NewListCmd(f *cmdutil.Factory) *cobra.Command {
 				return render.Error(opts.IO, scope, err)
 			}
 			opts.Org, opts.Scope = org, scope
+
+			if cmd.Flags().Changed("limit") {
+				if limit < 1 {
+					return render.Error(opts.IO, scope, cmdutil.FlagErrorf("--limit must be at least 1"))
+				}
+				opts.Limit = &limit
+			}
+			if cmd.Flags().Changed("offset") {
+				if offset < 0 {
+					return render.Error(opts.IO, scope, cmdutil.FlagErrorf("--offset must be at least 0"))
+				}
+				opts.Offset = &offset
+			}
 			return runList(cmd.Context(), opts)
 		},
 	}
+	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum number of results to return")
+	cmd.Flags().IntVar(&offset, "offset", 0, "Number of results to skip")
+	return cmd
 }
 
 func runList(ctx context.Context, o *ListOptions) error {
@@ -68,8 +88,10 @@ func runList(ctx context.Context, o *ListOptions) error {
 		return render.Error(o.IO, o.Scope, err)
 	}
 
-	// TODO: paginate
-	resp, err := client.ListProjectsWithResponse(ctx, o.Org, &amsvc.ListProjectsParams{})
+	resp, err := client.ListProjectsWithResponse(ctx, o.Org, &amsvc.ListProjectsParams{
+		Limit:  o.Limit,
+		Offset: o.Offset,
+	})
 	if err != nil {
 		return render.Error(o.IO, o.Scope, clierr.Newf(clierr.Transport, "%v", err))
 	}
@@ -89,5 +111,8 @@ func runList(ctx context.Context, o *ListOptions) error {
 		tp.AddField(p.CreatedAt.Format("2006-01-02"), tableprinter.WithColor(cs.Gray))
 		tp.EndRow()
 	}
-	return tp.Render()
+	if err := tp.Render(); err != nil {
+		return err
+	}
+	return render.TruncationHint(o.IO, resp.JSON200.Offset+len(resp.JSON200.Projects), resp.JSON200.Total, "projects")
 }
